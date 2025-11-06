@@ -11,7 +11,7 @@ permissions:
   pull-requests: write
 
 jobs:
-  main-ci:
+  dev-ci:
     runs-on: ubuntu-latest
 
     steps:
@@ -41,6 +41,7 @@ jobs:
       - name: Fetch best model from MLflow
         env:
           MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MLFLOW_EXPERIMENT_NAME: ${{ secrets.MLFLOW_EXPERIMENT_NAME }}
         run: |
           echo "Fetching best model from MLflow experiment..."
           python <<'PYCODE'
@@ -49,7 +50,7 @@ jobs:
           import os, shutil
 
           client = MlflowClient()
-          experiment_name = "Iris_DT_Classification"
+          experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME")
           experiment = client.get_experiment_by_name(experiment_name)
           if not experiment:
               raise SystemExit(f"Experiment '{experiment_name}' not found in MLflow.")
@@ -81,7 +82,7 @@ jobs:
           print(f"Saved best model locally at '{output_dir}/'")
           PYCODE
 
-      - name: Evaluate model performance
+      - name: Model sanity check & accuracy evaluation
         run: |
           python <<'PYCODE'
           import mlflow.pyfunc
@@ -104,31 +105,96 @@ jobs:
           print(report)
 
           with open("accuracy_report.md", "w") as f:
-              f.write("## Production Model Evaluation\n\n")
+              f.write("## Model Evaluation Report\n\n")
               f.write(f"**Test Accuracy:** {acc:.4f}\n\n")
-              f.write("### Sample Predictions:\n\n")
-              sample_preds = pd.DataFrame({"True": y_test.values[:5], "Predicted": y_pred[:5]})
-              f.write(sample_preds.to_markdown(index=False))
-              f.write("\n\n```text\n")
+              f.write("```text\n")
               f.write("### Classification Report\n\n")
               f.write(report)
               f.write("\n```\n\n")
           PYCODE
 
-      - name: Run tests and generate report
+      - name: Run unit tests and generate Markdown report
         run: |
           pytest --maxfail=1 --disable-warnings --tb=short -q --junitxml=report.xml > pytest_output.txt
 
-          echo "## Main Branch PyTest Summary Report" > main_report.md
-          echo "" >> main_report.md
-          echo "**Date:** $(date)" >> main_report.md
-          echo "" >> main_report.md
-          echo "### Test Output" >> main_report.md
-          echo '```' >> main_report.md
-          cat pytest_output.txt >> main_report.md
-          echo '```' >> main_report.md
-          echo "" >> main_report.md
+          echo "## Dev Branch Pytest Summary Report" > dev_report.md
+          echo "" >> dev_report.md
+          echo "**Date:** $(date)" >> dev_report.md
+          echo "" >> dev_report.md
+          echo "### Test Results:" >> dev_report.md
+          echo '```' >> dev_report.md
+          cat pytest_output.txt >> dev_report.md
+          echo '```' >> dev_report.md
+          echo "" >> dev_report.md
           pytest --maxfail=1 --disable-warnings --tb=short -q --cov=. --cov-report=term-missing >> pytest_output.txt 2>&1 || true
+
+      - name: Sample Prediction (Feast Online Store)
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GCP_KEY_JSON }}
+        run: |
+          echo "${GOOGLE_APPLICATION_CREDENTIALS}" > gcp-key.json
+          python <<'PYCODE'
+          from feast import FeatureStore
+          import pandas as pd
+          import mlflow.pyfunc
+
+          # Load Feature Store
+          store = FeatureStore(repo_path="feature_repo")
+
+          # Detect data version
+          df = pd.read_parquet("data/iris.parquet")
+          if "iris_v1_id" in df.columns:
+              version = "v1"
+              id_col = "iris_v1_id"
+          elif "iris_v2_id" in df.columns:
+              version = "v2"
+              id_col = "iris_v2_id"
+          else:
+              raise ValueError("No version column found (expected iris_v1_id or iris_v2_id).")
+
+          print(f"✅ Detected feature view version: {version}")
+
+          # Load model
+          model = mlflow.pyfunc.load_model("fetched_model")
+
+          sample_rows = []
+          for idx in range(0,5):
+              entity_id = f"{idx}-{version}"
+              entity_df = pd.DataFrame({id_col: [entity_id]})
+
+              print("\n===============================")
+              print("Requesting online features for entities:", entity_df.to_dict(orient='records'))
+
+              feature_vector = store.get_online_features(
+                  features=[
+                      f"iris_features_{version}:sepal_length",
+                      f"iris_features_{version}:sepal_width",
+                      f"iris_features_{version}:petal_length",
+                      f"iris_features_{version}:petal_width",
+                  ],
+                  entity_rows=entity_df.to_dict(orient="records"),
+              ).to_df()
+
+              print("Online features (raw):")
+              print(feature_vector)
+
+              X = feature_vector.drop(columns=[id_col])
+              pred = model.predict(X)[0]
+
+              # Find true label from df (if available)
+              true_label = df.loc[df[id_col] == entity_id, "species"].values[0] if entity_id in df[id_col].values else "N/A"
+
+              print(f"🌸 Predicted species: {pred}, True species: {true_label}")
+              sample_rows.append({"Entity": entity_id, "True": true_label, "Predicted": pred})
+
+          # Append to Markdown report
+          if sample_rows:
+              sample_df = pd.DataFrame(sample_rows)
+              with open("accuracy_report.md", "a") as f:
+                  f.write("### Sample Predictions (Feast Online Store)\n\n")
+                  f.write(sample_df.to_markdown(index=False))
+                  f.write("\n\n")
+          PYCODE
 
       - name: Set up CML
         uses: iterative/setup-cml@v2
@@ -143,13 +209,13 @@ jobs:
         env:
           REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cat accuracy_report.md >> main_report.md
-          cml comment create --target=commit --publish main_report.md
+          cat accuracy_report.md >> dev_report.md
+          cml comment create --target=commit --publish dev_report.md
 
       - name: Comment CML Report on PR (pull request)
         if: github.event_name == 'pull_request'
         env:
           REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cat accuracy_report.md >> main_report.md
-          cml comment create --target=pr --publish main_report.md
+          cat accuracy_report.md >> dev_report.md
+          cml comment create --target=pr --publish dev_report.md
