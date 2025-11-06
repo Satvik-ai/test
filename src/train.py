@@ -27,6 +27,7 @@ def main(max_depth: int, random_state: int, version: str, stratify: str = "NO"):
         mlflow.log_param("max_depth", max_depth)
         mlflow.log_param("random_state", random_state)
         mlflow.log_param("iris_data_version", version)
+        mlflow.log_param("feature_view", f"iris_features_{version}")
         mlflow.log_param("stratify", stratify)
 
         # --------------------------
