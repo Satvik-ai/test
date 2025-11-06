@@ -34,6 +34,13 @@ jobs:
         run: |
           echo "${GOOGLE_APPLICATION_CREDENTIALS}" > gcp-key.json
           dvc remote modify myremote credentialpath gcp-key.json
+        
+      - name: Setup GCP credentials
+        run: |
+          echo "${{ secrets.GCP_KEY_BASE64 }}" | base64 --decode > gcp-key.json
+          echo "GCP key file written to gcp-key.json"
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: gcp-key.json
 
       - name: Pull data from DVC
         run: dvc pull -r myremote
@@ -130,9 +137,8 @@ jobs:
 
       - name: Sample Prediction (Feast Online Store)
         env:
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GCP_KEY_JSON }}
+          GOOGLE_APPLICATION_CREDENTIALS: gcp-key.json
         run: |
-          echo "${GOOGLE_APPLICATION_CREDENTIALS}" > gcp-key.json
           python <<'PYCODE'
           from feast import FeatureStore
           import pandas as pd
