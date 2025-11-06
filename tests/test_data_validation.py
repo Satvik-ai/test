@@ -29,3 +29,14 @@ def test_parquet_data_integrity():
 
     # 5. Check ID column uniqueness
     assert df["iris_v1_id"].is_unique, "'iris_v1_id' column contains duplicate values"
+    
+def test_numeric_values_positive_parquet():
+    # Load dataset from Parquet file
+    df = pd.read_parquet("data/iris.parquet")
+
+    # Define numeric columns
+    numeric_cols = ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+
+    # Check all numeric values are positive (> 0)
+    for col in numeric_cols:
+        assert (df[col] > 0).all(), f"Negative or zero values found in column: {col}"
